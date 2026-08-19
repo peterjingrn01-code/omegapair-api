@@ -8,7 +8,7 @@ compatibility_date = "2026-07-03"
 [[d1_databases]]
 binding = "DB"
 database_name = "omega"
-database_id = "REPLACE_WITH_OMEGA_DATABASE_ID"
+database_id = "ee740437-febe-431f-8ba5-f2d293b46246"
 
 # ---- Durable Object: JOFP 信令中枢 ----
 # 这就是一直缺的那一块。JofpHub 已经写在 worker-index.js 里，
