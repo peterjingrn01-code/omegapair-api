@@ -1,0 +1,31 @@
+name = "omegapair-api"
+main = "worker-index.js"
+compatibility_date = "2026-07-03"
+
+# ---- D1 database ----
+# database_id 必须填 Dashboard 上 omega 这个数据库的真实 ID
+# (Storage & databases → D1 → omega → Database ID)
+[[d1_databases]]
+binding = "DB"
+database_name = "omega"
+database_id = "REPLACE_WITH_OMEGA_DATABASE_ID"
+
+# ---- Durable Object: JOFP 信令中枢 ----
+# 这就是一直缺的那一块。JofpHub 已经写在 worker-index.js 里，
+# 但必须通过下面的 migration 正式注册，Cloudflare 才会承认它。
+[[durable_objects.bindings]]
+name = "JOFP_HUB"
+class_name = "JofpHub"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["JofpHub"]
+
+# ---- 变量 ----
+[vars]
+FRONTEND_ORIGIN = "https://omega.jsl-ian.com"
+
+# ---- Secrets(不要写在这里,用命令行或 Dashboard 设置)----
+#   SESSION_SECRET    会话签名密钥
+#   RESEND_API_KEY    邮件验证码
+#   FROM_EMAIL        发件地址
