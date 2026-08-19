@@ -19,7 +19,7 @@ class_name = "JofpHub"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["JofpHub"]
+new_sqlite_classes = ["JofpHub"]
 
 # ---- 变量 ----
 [vars]
