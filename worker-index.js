@@ -382,7 +382,8 @@ async function handleMe(request, env, origin) {
 async function handlePostsList(request, env, origin) {
   const identity = await getSession(request, env); // optional
   const { results } = await env.DB.prepare(
-    `SELECT id, identity_id, handle, jing_x, jing_y, jing_z, text, likes, created_at, visibility
+    `SELECT id, identity_id, handle, jing_x, jing_y, jing_z, text, likes, created_at, visibility,
+            media_hash, media_name, media_type, media_size, media_chunks
      FROM posts ORDER BY created_at DESC LIMIT 100`
   ).all();
 
@@ -405,17 +406,33 @@ async function handlePostsCreate(request, env, origin) {
   const identity = await getSession(request, env);
   if (!identity) return json({ error: "Login required." }, 401, origin);
 
-  const { text, visibility } = await request.json();
+  const { text, visibility, media } = await request.json();
   const trimmed = String(text || "").trim();
-  if (!trimmed) return json({ error: "Post text cannot be empty." }, 400, origin);
+  const hasMedia = media && media.hash && media.size;
+  if (!trimmed && !hasMedia) return json({ error: "Post text cannot be empty." }, 400, origin);
   if (trimmed.length > 500) return json({ error: "Post text too long (max 500 chars)." }, 400, origin);
   const vis = visibility === 'friends' ? 'friends' : 'public';
 
+  // Only the fingerprint of an attachment is stored. The bytes themselves
+  // live on whichever devices currently hold a copy; when nobody holds it
+  // any more the image is simply gone, and the post says so.
+  let mediaHash = null, mediaName = null, mediaType = null, mediaSize = null, mediaChunks = null;
+  if (hasMedia) {
+    mediaHash = String(media.hash).slice(0, 128);
+    mediaName = String(media.name || "").slice(0, 200);
+    mediaType = String(media.mimeType || "").slice(0, 100);
+    mediaSize = Number(media.size) || 0;
+    mediaChunks = Number(media.chunks) || 0;
+  }
+
   const createdAt = Date.now();
   const result = await env.DB.prepare(
-    `INSERT INTO posts (identity_id, handle, jing_x, jing_y, jing_z, text, likes, created_at, visibility)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
-  ).bind(identity.id, identity.handle, identity.jing_x, identity.jing_y, identity.jing_z, trimmed, createdAt, vis).run();
+    `INSERT INTO posts (identity_id, handle, jing_x, jing_y, jing_z, text, likes, created_at, visibility,
+                        media_hash, media_name, media_type, media_size, media_chunks)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(identity.id, identity.handle, identity.jing_x, identity.jing_y, identity.jing_z,
+         trimmed, createdAt, vis,
+         mediaHash, mediaName, mediaType, mediaSize, mediaChunks).run();
 
   return json({
     post: {
@@ -423,6 +440,8 @@ async function handlePostsCreate(request, env, origin) {
       handle: identity.handle,
       jing_x: identity.jing_x, jing_y: identity.jing_y, jing_z: identity.jing_z,
       text: trimmed, likes: 0, created_at: createdAt, visibility: vis,
+      media_hash: mediaHash, media_name: mediaName, media_type: mediaType,
+      media_size: mediaSize, media_chunks: mediaChunks,
     },
   }, 200, origin);
 }
@@ -783,6 +802,10 @@ export class JofpHub {
     this.state = state;
     this.env = env;
     this.sessions = new Map(); // wireId -> WebSocket
+    // Which connected identities currently hold a copy of a given piece of
+    // media, keyed by content hash. Purely in-memory: when the last holder
+    // disconnects the entry disappears and so, in effect, does the image.
+    this.swarms = new Map();   // mediaHash -> Set<wireId>
   }
 
   async fetch(request) {
@@ -819,17 +842,60 @@ export class JofpHub {
 
     ws.addEventListener("close", () => {
       if (this.sessions.get(wireId) === ws) this.sessions.delete(wireId);
+      this.leaveAllSwarms(wireId);
     });
     ws.addEventListener("error", () => {
       if (this.sessions.get(wireId) === ws) this.sessions.delete(wireId);
+      this.leaveAllSwarms(wireId);
     });
   }
 
+  leaveAllSwarms(wireId) {
+    for (const [hash, holders] of this.swarms) {
+      holders.delete(wireId);
+      if (holders.size === 0) this.swarms.delete(hash);
+    }
+  }
+
   route(fromWireId, msg) {
+    if (!msg) return;
+
+    // ---- swarm bookkeeping: who currently holds which media ----
+    if (msg.type === "seed") {
+      if (typeof msg.hash !== "string") return;
+      if (!this.swarms.has(msg.hash)) this.swarms.set(msg.hash, new Set());
+      this.swarms.get(msg.hash).add(fromWireId);
+      return;
+    }
+
+    if (msg.type === "unseed") {
+      const holders = this.swarms.get(msg.hash);
+      if (holders) {
+        holders.delete(fromWireId);
+        if (holders.size === 0) this.swarms.delete(msg.hash);
+      }
+      return;
+    }
+
+    if (msg.type === "find") {
+      // Report back which connected peers hold this media right now.
+      const holders = this.swarms.get(msg.hash);
+      const peers = holders
+        ? [...holders].filter((w) => w !== fromWireId && this.sessions.has(w))
+        : [];
+      const sender = this.sessions.get(fromWireId);
+      if (sender) {
+        try {
+          sender.send(JSON.stringify({ type: "holders", hash: msg.hash, peers }));
+        } catch (e) {}
+      }
+      return;
+    }
+
     // Every message must name a recipient; this hub only ever does
     // one-to-one relaying, never broadcast, and only to identities that
     // are currently connected.
-    if (!msg || !msg.to || typeof msg.to !== "string") return;
+    if (!msg.to || typeof msg.to !== "string") return;
     const target = this.sessions.get(msg.to);
     if (!target) {
       // Recipient not online — tell the sender so the UI can show that,
